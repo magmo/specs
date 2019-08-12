@@ -1,4 +1,4 @@
--------------------------- MODULE ConsensusPlusCal --------------------------
+-------------------------- MODULE ConsensusUpdate --------------------------
 EXTENDS Integers, Sequences, TLC
 CONSTANTS
     Names, \* a set
@@ -225,7 +225,7 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                         status |-> Status.SUCCESS
                                                                                     ]
                                                                      ELSE /\ Assert((NumParticipants - 1) > 0, 
-                                                                                    "Failure of assertion at line 45, column 1 of macro called at line 141, column 55.")
+                                                                                    "Failure of assertion at line 47, column 1 of macro called at line 143, column 55.")
                                                                           /\ state' = [state EXCEPT ![self] =          [
                                                                                                                   type |-> Types.SENT,
                                                                                                                   turnNumber |-> (state[self].turnNumber+1),
@@ -247,7 +247,7 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                         status |-> Status.ABORT
                                                                                     ]
                                                                      ELSE /\ Assert(FALSE, 
-                                                                                    "Failure of assertion at line 143, column 22.")
+                                                                                    "Failure of assertion at line 145, column 22.")
                                                                           /\ UNCHANGED << msg, 
                                                                                           state >>
                                          ELSE /\ msg /= NULL /\ msg.to = me[self]
@@ -285,7 +285,7 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                                                                                      status |-> Status.SUCCESS
                                                                                                                                                  ]
                                                                                                                                   ELSE /\ Assert((msg.votesRequired - 1) > 0, 
-                                                                                                                                                 "Failure of assertion at line 45, column 1 of macro called at line 159, column 63.")
+                                                                                                                                                 "Failure of assertion at line 47, column 1 of macro called at line 161, column 63.")
                                                                                                                                        /\ state' = [state EXCEPT ![self] =          [
                                                                                                                                                                                type |-> Types.SENT,
                                                                                                                                                                                turnNumber |-> (msg.turnNumber + 1),
@@ -306,7 +306,7 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                                                                           status |-> Status.ABORT
                                                                                                                                       ]
                                                                                                                  ELSE /\ Assert(FALSE, 
-                                                                                                                                "Failure of assertion at line 160, column 30.")
+                                                                                                                                "Failure of assertion at line 162, column 30.")
                                                                                                                       /\ UNCHANGED << msg, 
                                                                                                                                       state >>
                                                                                            ELSE /\ state' = [state EXCEPT ![self] =          [
@@ -334,7 +334,7 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                              status |-> Status.SUCCESS
                                                                                          ]
                                                                           ELSE /\ Assert(FALSE, 
-                                                                                         "Failure of assertion at line 167, column 18.")
+                                                                                         "Failure of assertion at line 169, column 18.")
                                                                                /\ UNCHANGED << msg, 
                                                                                                state >>
                                    /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
@@ -407,5 +407,5 @@ MessagesAreRead == <>[](msg = NULL)
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Aug 09 12:11:18 MDT 2019 by andrewstewart
+\* Last modified Mon Aug 12 14:42:54 MDT 2019 by andrewstewart
 \* Created Tue Aug 06 14:38:11 MDT 2019 by andrewstewart
