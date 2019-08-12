@@ -165,8 +165,11 @@ begin
                     end if;
                 end if; end either;
             elsif msg.status = Status.ABORT then returnFailure(state.turnNumber)
-            elsif msg.status = Status.SUCCESS then returnSuccess()
-            else assert FALSE
+            elsif msg.status = Status.SUCCESS then
+                either returnSuccess() \* If I'm ok with the commitment
+                or     returnFailure(state.turnNumber) \* If you sent me an invalid commitment
+                end either;
+
             end if;
         end if;
     end while;
@@ -328,13 +331,20 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                   status |-> Status.ABORT
                                                                               ]
                                                                ELSE /\ IF msg.status = Status.SUCCESS
-                                                                          THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
-                                                                               /\ msg' =        [
-                                                                                             to     |-> target(state'[self].turnNumber),
-                                                                                             status |-> Status.SUCCESS
-                                                                                         ]
-                                                                          ELSE /\ Assert(FALSE, 
-                                                                                         "Failure of assertion at line 169, column 18.")
+                                                                          THEN /\ \/ /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
+                                                                                     /\ msg' =        [
+                                                                                                   to     |-> target(state'[self].turnNumber),
+                                                                                                   status |-> Status.SUCCESS
+                                                                                               ]
+                                                                                  \/ /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                             type |-> Types.FAILURE,
+                                                                                                                             turnNumber |-> (state[self].turnNumber)
+                                                                                                                         ] @@ state[self]]
+                                                                                     /\ msg' =        [
+                                                                                                   to |-> target(state'[self].ourIndex + 1),
+                                                                                                   status |-> Status.ABORT
+                                                                                               ]
+                                                                          ELSE /\ TRUE
                                                                                /\ UNCHANGED << msg, 
                                                                                                state >>
                                    /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
@@ -407,5 +417,5 @@ MessagesAreRead == <>[](msg = NULL)
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Aug 12 14:42:54 MDT 2019 by andrewstewart
+\* Last modified Mon Aug 12 15:51:17 MDT 2019 by andrewstewart
 \* Created Tue Aug 06 14:38:11 MDT 2019 by andrewstewart
