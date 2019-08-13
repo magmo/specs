@@ -35,7 +35,7 @@ define
 mover(turnNumber) == 1 + ((turnNumber-1) % NumParticipants)
 safeToSend(state) ==
     /\ state.type = Types.WAITING
-    /\ \/ state.ourIndex = state.turnNumber % NumParticipants
+    /\ \/ state.ourIndex = mover(state.turnNumber)
        \/ /\ msg /= NULL
           /\ msg.status = Status.OK
           /\ state.ourIndex = mover(msg.turnNumber)
@@ -186,7 +186,7 @@ VARIABLES msg, pc
 mover(turnNumber) == 1 + ((turnNumber-1) % NumParticipants)
 safeToSend(state) ==
     /\ state.type = Types.WAITING
-    /\ \/ state.ourIndex = state.turnNumber % NumParticipants
+    /\ \/ state.ourIndex = mover(state.turnNumber)
        \/ /\ msg /= NULL
           /\ msg.status = Status.OK
           /\ state.ourIndex = mover(msg.turnNumber)
@@ -417,5 +417,5 @@ MessagesAreRead == <>[](msg = NULL)
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Aug 12 15:51:17 MDT 2019 by andrewstewart
+\* Last modified Mon Aug 12 22:26:37 MDT 2019 by andrewstewart
 \* Created Tue Aug 06 14:38:11 MDT 2019 by andrewstewart
