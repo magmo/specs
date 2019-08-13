@@ -96,15 +96,6 @@ state := [
 msg := NULL;
 end macro;
 
-macro voteOrreturnFailure(turnNumber, votesRequired)
-begin
-\* If the participant agrees with the allocation, they vote
-either vote(turnNumber, votesRequired)
-\* Otherwise, they return FAILURE
-or returnFailure(turnNumber) 
-end either; end macro;
-
-
 (***************************************************************************)
 (* Calling this a fair process prevents the process from stuttering        *)
 (* forever.  It's always considered to be valid to take a step where your  *)
@@ -138,39 +129,33 @@ begin
   ReachConsensus:
     while Running(state) do
         if safeToSend(state) /\ msg = NULL then
-            either returnFailure(state.turnNumber) \* If the commitment is not valid
-            or
-                if    state.type = Types.WAITING then vote(state.turnNumber+1, NumParticipants - 1);
-                elsif state.type = Types.SENT    then returnFailure(state.turnNumber);
-                else assert FALSE
-                end if;
-            end either;
+            if state.type = Types.WAITING then vote(state.turnNumber+1, NumParticipants - 1);
+            elsif state.type = Types.SENT then returnFailure(state.turnNumber);
+            else assert FALSE
+            end if;
         else  
             await msg /= NULL /\ msg.to = me;
-            if msg.status = Status.OK then
-                \* If the commitment receved is not valid, return FAILURE
-                \* TODO: Is this the actual behaviour we want?
-                \* In the readme, we say this is what works, but the reducer does not
-                \* work this way
-                either returnFailure(state.turnNumber)
-                or if msg.turnNumber > state.turnNumber then
+            \* If the commitment receved is not valid, return FAILURE
+            \* TODO: Is this the actual behaviour we want?
+            \* In the readme, we say this is what works, but the reducer does not
+            \* work this way
+            either returnFailure(state.turnNumber)
+            \* In this case, the commitment was valid.
+            or if msg.status = Status.OK then
+                if msg.turnNumber > state.turnNumber then
                     \* First, update our state based on the incoming message
                     if msg.votesRequired = 0 then returnSuccess()
                     elsif safeToSend(state) then
                         if    state.type = Types.SENT then returnFailure(msg.turnNumber)
-                        elsif state.type = Types.WAITING then voteOrreturnFailure(msg.turnNumber + 1, msg.votesRequired - 1)
+                        elsif state.type = Types.WAITING then vote(msg.turnNumber + 1, msg.votesRequired - 1)
                         else assert FALSE;
                         end if;
                     else waitForUpdate(msg.turnNumber)
                     end if;
-                end if; end either;
-            elsif msg.status = Status.ABORT then returnFailure(state.turnNumber)
-            elsif msg.status = Status.SUCCESS then
-                either returnSuccess() \* If I'm ok with the commitment
-                or     returnFailure(state.turnNumber) \* If you sent me an invalid commitment
-                end either;
-
-            end if;
+                end if;
+            elsif msg.status = Status.ABORT   then returnFailure(state.turnNumber)
+            elsif msg.status = Status.SUCCESS then returnSuccess()
+            end if; end either;
         end if;
     end while;
 end process;
@@ -212,7 +197,41 @@ Init == (* Global variables *)
 ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                         /\ IF Running(state[self])
                               THEN /\ IF safeToSend(state[self]) /\ msg = NULL
-                                         THEN /\ \/ /\ state' = [state EXCEPT ![self] =          [
+                                         THEN /\ IF state[self].type = Types.WAITING
+                                                    THEN /\ IF (NumParticipants - 1) = 0
+                                                               THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
+                                                                    /\ msg' =        [
+                                                                                  to     |-> target(state'[self].turnNumber),
+                                                                                  status |-> Status.SUCCESS
+                                                                              ]
+                                                               ELSE /\ Assert((NumParticipants - 1) > 0, 
+                                                                              "Failure of assertion at line 47, column 1 of macro called at line 141, column 48.")
+                                                                    /\ state' = [state EXCEPT ![self] =          [
+                                                                                                            type |-> Types.SENT,
+                                                                                                            turnNumber |-> (state[self].turnNumber+1),
+                                                                                                            ourIndex   |-> state[self].ourIndex
+                                                                                                        ]]
+                                                                    /\ msg' =        [
+                                                                                  to |-> target(state'[self].turnNumber),
+                                                                                  turnNumber      |-> state'[self].turnNumber,
+                                                                                  votesRequired   |-> (NumParticipants - 1),
+                                                                                  status          |-> Status.OK
+                                                                              ]
+                                                    ELSE /\ IF state[self].type = Types.SENT
+                                                               THEN /\ state' = [state EXCEPT ![self] =          [
+                                                                                                            type |-> Types.FAILURE,
+                                                                                                            turnNumber |-> (state[self].turnNumber)
+                                                                                                        ] @@ state[self]]
+                                                                    /\ msg' =        [
+                                                                                  to |-> target(state'[self].ourIndex + 1),
+                                                                                  status |-> Status.ABORT
+                                                                              ]
+                                                               ELSE /\ Assert(FALSE, 
+                                                                              "Failure of assertion at line 143, column 18.")
+                                                                    /\ UNCHANGED << msg, 
+                                                                                    state >>
+                                         ELSE /\ msg /= NULL /\ msg.to = me[self]
+                                              /\ \/ /\ state' = [state EXCEPT ![self] =          [
                                                                                             type |-> Types.FAILURE,
                                                                                             turnNumber |-> (state[self].turnNumber)
                                                                                         ] @@ state[self]]
@@ -220,50 +239,8 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                   to |-> target(state'[self].ourIndex + 1),
                                                                   status |-> Status.ABORT
                                                               ]
-                                                 \/ /\ IF state[self].type = Types.WAITING
-                                                          THEN /\ IF (NumParticipants - 1) = 0
-                                                                     THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
-                                                                          /\ msg' =        [
-                                                                                        to     |-> target(state'[self].turnNumber),
-                                                                                        status |-> Status.SUCCESS
-                                                                                    ]
-                                                                     ELSE /\ Assert((NumParticipants - 1) > 0, 
-                                                                                    "Failure of assertion at line 47, column 1 of macro called at line 143, column 55.")
-                                                                          /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                  type |-> Types.SENT,
-                                                                                                                  turnNumber |-> (state[self].turnNumber+1),
-                                                                                                                  ourIndex   |-> state[self].ourIndex
-                                                                                                              ]]
-                                                                          /\ msg' =        [
-                                                                                        to |-> target(state'[self].turnNumber),
-                                                                                        turnNumber      |-> state'[self].turnNumber,
-                                                                                        votesRequired   |-> (NumParticipants - 1),
-                                                                                        status          |-> Status.OK
-                                                                                    ]
-                                                          ELSE /\ IF state[self].type = Types.SENT
-                                                                     THEN /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                  type |-> Types.FAILURE,
-                                                                                                                  turnNumber |-> (state[self].turnNumber)
-                                                                                                              ] @@ state[self]]
-                                                                          /\ msg' =        [
-                                                                                        to |-> target(state'[self].ourIndex + 1),
-                                                                                        status |-> Status.ABORT
-                                                                                    ]
-                                                                     ELSE /\ Assert(FALSE, 
-                                                                                    "Failure of assertion at line 145, column 22.")
-                                                                          /\ UNCHANGED << msg, 
-                                                                                          state >>
-                                         ELSE /\ msg /= NULL /\ msg.to = me[self]
-                                              /\ IF msg.status = Status.OK
-                                                    THEN /\ \/ /\ state' = [state EXCEPT ![self] =          [
-                                                                                                       type |-> Types.FAILURE,
-                                                                                                       turnNumber |-> (state[self].turnNumber)
-                                                                                                   ] @@ state[self]]
-                                                               /\ msg' =        [
-                                                                             to |-> target(state'[self].ourIndex + 1),
-                                                                             status |-> Status.ABORT
-                                                                         ]
-                                                            \/ /\ IF msg.turnNumber > state[self].turnNumber
+                                                 \/ /\ IF msg.status = Status.OK
+                                                          THEN /\ IF msg.turnNumber > state[self].turnNumber
                                                                      THEN /\ IF msg.votesRequired = 0
                                                                                 THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
                                                                                      /\ msg' =        [
@@ -281,35 +258,27 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                                                                          status |-> Status.ABORT
                                                                                                                      ]
                                                                                                       ELSE /\ IF state[self].type = Types.WAITING
-                                                                                                                 THEN /\ \/ /\ IF (msg.votesRequired - 1) = 0
-                                                                                                                                  THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
-                                                                                                                                       /\ msg' =        [
-                                                                                                                                                     to     |-> target(state'[self].turnNumber),
-                                                                                                                                                     status |-> Status.SUCCESS
-                                                                                                                                                 ]
-                                                                                                                                  ELSE /\ Assert((msg.votesRequired - 1) > 0, 
-                                                                                                                                                 "Failure of assertion at line 47, column 1 of macro called at line 161, column 63.")
-                                                                                                                                       /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                                                                               type |-> Types.SENT,
-                                                                                                                                                                               turnNumber |-> (msg.turnNumber + 1),
-                                                                                                                                                                               ourIndex   |-> state[self].ourIndex
-                                                                                                                                                                           ]]
-                                                                                                                                       /\ msg' =        [
-                                                                                                                                                     to |-> target(state'[self].turnNumber),
-                                                                                                                                                     turnNumber      |-> state'[self].turnNumber,
-                                                                                                                                                     votesRequired   |-> (msg.votesRequired - 1),
-                                                                                                                                                     status          |-> Status.OK
-                                                                                                                                                 ]
-                                                                                                                         \/ /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                                                                    type |-> Types.FAILURE,
-                                                                                                                                                                    turnNumber |-> (msg.turnNumber + 1)
-                                                                                                                                                                ] @@ state[self]]
-                                                                                                                            /\ msg' =        [
-                                                                                                                                          to |-> target(state'[self].ourIndex + 1),
-                                                                                                                                          status |-> Status.ABORT
-                                                                                                                                      ]
+                                                                                                                 THEN /\ IF (msg.votesRequired - 1) = 0
+                                                                                                                            THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
+                                                                                                                                 /\ msg' =        [
+                                                                                                                                               to     |-> target(state'[self].turnNumber),
+                                                                                                                                               status |-> Status.SUCCESS
+                                                                                                                                           ]
+                                                                                                                            ELSE /\ Assert((msg.votesRequired - 1) > 0, 
+                                                                                                                                           "Failure of assertion at line 47, column 1 of macro called at line 159, column 63.")
+                                                                                                                                 /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                                                                         type |-> Types.SENT,
+                                                                                                                                                                         turnNumber |-> (msg.turnNumber + 1),
+                                                                                                                                                                         ourIndex   |-> state[self].ourIndex
+                                                                                                                                                                     ]]
+                                                                                                                                 /\ msg' =        [
+                                                                                                                                               to |-> target(state'[self].turnNumber),
+                                                                                                                                               turnNumber      |-> state'[self].turnNumber,
+                                                                                                                                               votesRequired   |-> (msg.votesRequired - 1),
+                                                                                                                                               status          |-> Status.OK
+                                                                                                                                           ]
                                                                                                                  ELSE /\ Assert(FALSE, 
-                                                                                                                                "Failure of assertion at line 162, column 30.")
+                                                                                                                                "Failure of assertion at line 160, column 30.")
                                                                                                                       /\ UNCHANGED << msg, 
                                                                                                                                       state >>
                                                                                            ELSE /\ state' = [state EXCEPT ![self] =          [
@@ -321,32 +290,24 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                                                      ELSE /\ TRUE
                                                                           /\ UNCHANGED << msg, 
                                                                                           state >>
-                                                    ELSE /\ IF msg.status = Status.ABORT
-                                                               THEN /\ state' = [state EXCEPT ![self] =          [
-                                                                                                            type |-> Types.FAILURE,
-                                                                                                            turnNumber |-> (state[self].turnNumber)
-                                                                                                        ] @@ state[self]]
-                                                                    /\ msg' =        [
-                                                                                  to |-> target(state'[self].ourIndex + 1),
-                                                                                  status |-> Status.ABORT
-                                                                              ]
-                                                               ELSE /\ IF msg.status = Status.SUCCESS
-                                                                          THEN /\ \/ /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
+                                                          ELSE /\ IF msg.status = Status.ABORT
+                                                                     THEN /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                  type |-> Types.FAILURE,
+                                                                                                                  turnNumber |-> (state[self].turnNumber)
+                                                                                                              ] @@ state[self]]
+                                                                          /\ msg' =        [
+                                                                                        to |-> target(state'[self].ourIndex + 1),
+                                                                                        status |-> Status.ABORT
+                                                                                    ]
+                                                                     ELSE /\ IF msg.status = Status.SUCCESS
+                                                                                THEN /\ state' = [state EXCEPT ![self] = [ type |-> Types.SUCCESS] @@ state[self]]
                                                                                      /\ msg' =        [
                                                                                                    to     |-> target(state'[self].turnNumber),
                                                                                                    status |-> Status.SUCCESS
                                                                                                ]
-                                                                                  \/ /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                             type |-> Types.FAILURE,
-                                                                                                                             turnNumber |-> (state[self].turnNumber)
-                                                                                                                         ] @@ state[self]]
-                                                                                     /\ msg' =        [
-                                                                                                   to |-> target(state'[self].ourIndex + 1),
-                                                                                                   status |-> Status.ABORT
-                                                                                               ]
-                                                                          ELSE /\ TRUE
-                                                                               /\ UNCHANGED << msg, 
-                                                                                               state >>
+                                                                                ELSE /\ TRUE
+                                                                                     /\ UNCHANGED << msg, 
+                                                                                                     state >>
                                    /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                                    /\ UNCHANGED << msg, state >>
@@ -417,5 +378,5 @@ MessagesAreRead == <>[](msg = NULL)
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Aug 12 22:26:37 MDT 2019 by andrewstewart
+\* Last modified Mon Aug 12 23:19:29 MDT 2019 by andrewstewart
 \* Created Tue Aug 06 14:38:11 MDT 2019 by andrewstewart
