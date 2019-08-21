@@ -27,6 +27,7 @@ AllowedBehaviours == [
   SLEEP        |-> "SLEEP"
 ]
 ChallengeStatus == [
+  CLEARED |-> "CLEARED",
   ACTIVE  |-> "ACTIVE",
   EXPIRED |-> "EXPIRED"
 ]
@@ -44,7 +45,7 @@ ASSUME
 \* This is Pluscal (Pascal for TLA+)
 
 variables msgs = [p \in Names |-> {}],
-          challenge = NULL
+          challenge = [turnNumber |-> 0, status |-> ChallengeStatus.CLEARED]
 
 define
 \* Arrays are 1-indexed, while the % operator returns a number between 0 and NumParticipants.
@@ -57,8 +58,7 @@ becomesOurTurn(state, msg) ==
    /\ state.type = Types.WAITING
    /\ msg.status = Status.OK
    /\ state.ourIndex = mover(msg.turnNumber)
-
-someoneIsBlocking(idx) == \E p \in idx..NumParticipants : Behaviours[p] = AllowedBehaviours.SLEEP
+challengeIsPresent == challenge.status # ChallengeStatus.CLEARED
 
 target(turnNumber) == Participants[mover(turnNumber)]
 end define;
@@ -142,7 +142,6 @@ end macro;
 
 macro forceMove(turnNumber)
 begin
-assert challenge = NULL;
 challenge := [
   turnNumber |-> turnNumber,
   status     |-> ChallengeStatus.ACTIVE
@@ -203,30 +202,33 @@ begin
         (* triggers the force move, or whose turn it is.                   *)
         (*******************************************************************)
         if Behaviours[self] = AllowedBehaviours.SLEEP then skip;
-        else
+        elsif currentlyOurTurn(state) then takeAction(state.turnNumber, NumParticipants - 1, me);
+        else 
             either
-                \* My wallet should have some timeout after which it plays a forceMove
-                \* This allows my wallet to ensure that the consensusUpdate protocol eventually terminates
-                    if ~currentlyOurTurn(state)
-                    then
-                        ForceMove:  forceMove(state.turnNumber);
-                        WaitForResponse:
-                            await challenge.status # ChallengeStatus.ACTIVE;
-                            if    challenge.status = ChallengeStatus.RESPONDED then skip; \* Implement me
-                            elsif challenge.status = ChallengeStatus.EXPIRED   then terminate(challenge.turnNumber);
-                            else assert FALSE; \* This should never happen
-                            end if;
-                    end if;
-            or
-                \* My wallet noticed some event (either a challenge or a message) and responds accordingly
-                if challenge # NULL
+            \* My wallet should have some timeout after which it plays a forceMove
+            \* This allows my wallet to ensure that the consensusUpdate protocol eventually terminates
+            ForceMove:
+                if /\ ~currentlyOurTurn(state)
+                   /\ ~challengeIsPresent
                 then
-                    ProcessChallenge: processChallenge();
-                    RespondToChallenge: respondToChallenge();
-                else
-                    if currentlyOurTurn(state) then takeAction(state.turnNumber, NumParticipants - 1, me);
-                    else 
-                        WaitForMessage: with m \in msgs[me] do msg := m end with;
+                    assert challenge.status = ChallengeStatus.CLEARED;
+                    forceMove(state.turnNumber);
+                    WaitForChallengeResponse:
+                        await challenge.status # ChallengeStatus.ACTIVE;
+                        if    challenge.status = ChallengeStatus.RESPONDED then skip; \* Implement me
+                        elsif challenge.status = ChallengeStatus.EXPIRED   then terminate(challenge.turnNumber);
+                        else assert FALSE; \* This should never happen
+                        end if;
+                end if;
+             or
+                \* My wallet noticed an event (a challenge or message) and responds accordingly
+                WaitForEvent:
+                    await challengeIsPresent \/ msgs[me] # {};
+                    if challengeIsPresent then
+                        ProcessChallenge: processChallenge();
+                        RespondToChallenge: respondToChallenge();
+                    else                    
+                        ReadMessage: with m \in msgs[me] do msg := m end with;
                         ProcessMessage:
                             if msg.status = Status.OK then
                                 if msg.turnNumber > state.turnNumber then
@@ -242,9 +244,8 @@ begin
                             assert msg # NULL;
                             msgs[me] := msgs[me] \ {msg};
                             msg := NULL;
-                        end if;
-                end if;
-     
+                                
+                    end if;
             end either;
         end if;
     end while;
@@ -266,8 +267,7 @@ becomesOurTurn(state, msg) ==
    /\ state.type = Types.WAITING
    /\ msg.status = Status.OK
    /\ state.ourIndex = mover(msg.turnNumber)
-
-someoneIsBlocking(idx) == \E p \in idx..NumParticipants : Behaviours[p] = AllowedBehaviours.SLEEP
+challengeIsPresent == challenge.status # ChallengeStatus.CLEARED
 
 target(turnNumber) == Participants[mover(turnNumber)]
 
@@ -279,7 +279,7 @@ ProcSet == (ParticipantIndices)
 
 Init == (* Global variables *)
         /\ msgs = [p \in Names |-> {}]
-        /\ challenge = NULL
+        /\ challenge = [turnNumber |-> 0, status |-> ChallengeStatus.CLEARED]
         (* Process consensusUpdate *)
         /\ state = [self \in ParticipantIndices |->         [
                                                       turnNumber |-> StartingTurnNumber,
@@ -296,93 +296,97 @@ ReachConsensus(self) == /\ pc[self] = "ReachConsensus"
                                          THEN /\ TRUE
                                               /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
                                               /\ UNCHANGED << msgs, state >>
-                                         ELSE /\ \/ /\ IF ~currentlyOurTurn(state[self])
-                                                          THEN /\ pc' = [pc EXCEPT ![self] = "ForceMove"]
-                                                          ELSE /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
-                                                    /\ UNCHANGED <<msgs, state>>
-                                                 \/ /\ IF challenge # NULL
-                                                          THEN /\ pc' = [pc EXCEPT ![self] = "ProcessChallenge"]
-                                                               /\ UNCHANGED << msgs, 
-                                                                               state >>
-                                                          ELSE /\ IF currentlyOurTurn(state[self])
-                                                                     THEN /\ IF state[self].type = Types.WAITING
-                                                                                THEN /\ IF Behaviours[self] = AllowedBehaviours.VOTE
-                                                                                           THEN /\ IF (NumParticipants - 1) = 0
-                                                                                                      THEN /\ state' = [state EXCEPT ![self] = [ type  |-> Types.SUCCESS,  turnNumber |-> ((state[self].turnNumber)+1)] @@ state[self]]
-                                                                                                           /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {([status |-> Status.SUCCESS, turnNumber |-> ((state'[self].turnNumber)+1)])}]
-                                                                                                      ELSE /\ Assert((NumParticipants - 1) > 0, 
-                                                                                                                     "Failure of assertion at line 73, column 1 of macro called at line 227, column 53.")
-                                                                                                           /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                                                   type |-> Types.SENT,
-                                                                                                                                                   turnNumber |-> ((state[self].turnNumber)+1),
-                                                                                                                                                   ourIndex   |-> state[self].ourIndex
-                                                                                                                                               ]]
-                                                                                                           /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
-                                                                                                                          turnNumber      |-> state'[self].turnNumber,
-                                                                                                                          votesRequired   |-> (NumParticipants - 1),
-                                                                                                                          status          |-> Status.OK
-                                                                                                                      ])}]
-                                                                                           ELSE /\ IF Behaviours[self] = AllowedBehaviours.VETO
-                                                                                                      THEN /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                                                   type |-> Types.FAILURE,
-                                                                                                                                                   turnNumber |-> (state[self].turnNumber)
-                                                                                                                                               ] @@ state[self]]
-                                                                                                           /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
-                                                                                                                          status |-> Status.ABORT,
-                                                                                                                          turnNunber |-> (state'[self].turnNumber)
-                                                                                                                      ])}]
-                                                                                                      ELSE /\ IF Behaviours[self] = AllowedBehaviours.SLEEP
-                                                                                                                 THEN /\ TRUE
-                                                                                                                 ELSE /\ Assert(FALSE, 
-                                                                                                                                "Failure of assertion at line 128, column 14 of macro called at line 227, column 53.")
-                                                                                                           /\ UNCHANGED << msgs, 
-                                                                                                                           state >>
-                                                                                ELSE /\ IF state[self].type = Types.SENT
-                                                                                           THEN /\ state' = [state EXCEPT ![self] =          [
-                                                                                                                                        type |-> Types.FAILURE,
-                                                                                                                                        turnNumber |-> (state[self].turnNumber)
-                                                                                                                                    ] @@ state[self]]
-                                                                                                /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
-                                                                                                               status |-> Status.ABORT,
-                                                                                                               turnNunber |-> (state'[self].turnNumber)
-                                                                                                           ])}]
-                                                                                           ELSE /\ Assert(FALSE, 
-                                                                                                          "Failure of assertion at line 131, column 10 of macro called at line 227, column 53.")
-                                                                                                /\ UNCHANGED << msgs, 
-                                                                                                                state >>
-                                                                          /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
-                                                                     ELSE /\ pc' = [pc EXCEPT ![self] = "WaitForMessage"]
-                                                                          /\ UNCHANGED << msgs, 
-                                                                                          state >>
+                                         ELSE /\ IF currentlyOurTurn(state[self])
+                                                    THEN /\ IF state[self].type = Types.WAITING
+                                                               THEN /\ IF Behaviours[self] = AllowedBehaviours.VOTE
+                                                                          THEN /\ IF (NumParticipants - 1) = 0
+                                                                                     THEN /\ state' = [state EXCEPT ![self] = [ type  |-> Types.SUCCESS,  turnNumber |-> ((state[self].turnNumber)+1)] @@ state[self]]
+                                                                                          /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {([status |-> Status.SUCCESS, turnNumber |-> ((state'[self].turnNumber)+1)])}]
+                                                                                     ELSE /\ Assert((NumParticipants - 1) > 0, 
+                                                                                                    "Failure of assertion at line 73, column 1 of macro called at line 205, column 44.")
+                                                                                          /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                                  type |-> Types.SENT,
+                                                                                                                                  turnNumber |-> ((state[self].turnNumber)+1),
+                                                                                                                                  ourIndex   |-> state[self].ourIndex
+                                                                                                                              ]]
+                                                                                          /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
+                                                                                                         turnNumber      |-> state'[self].turnNumber,
+                                                                                                         votesRequired   |-> (NumParticipants - 1),
+                                                                                                         status          |-> Status.OK
+                                                                                                     ])}]
+                                                                          ELSE /\ IF Behaviours[self] = AllowedBehaviours.VETO
+                                                                                     THEN /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                                  type |-> Types.FAILURE,
+                                                                                                                                  turnNumber |-> (state[self].turnNumber)
+                                                                                                                              ] @@ state[self]]
+                                                                                          /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
+                                                                                                         status |-> Status.ABORT,
+                                                                                                         turnNunber |-> (state'[self].turnNumber)
+                                                                                                     ])}]
+                                                                                     ELSE /\ IF Behaviours[self] = AllowedBehaviours.SLEEP
+                                                                                                THEN /\ TRUE
+                                                                                                ELSE /\ Assert(FALSE, 
+                                                                                                               "Failure of assertion at line 128, column 14 of macro called at line 205, column 44.")
+                                                                                          /\ UNCHANGED << msgs, 
+                                                                                                          state >>
+                                                               ELSE /\ IF state[self].type = Types.SENT
+                                                                          THEN /\ state' = [state EXCEPT ![self] =          [
+                                                                                                                       type |-> Types.FAILURE,
+                                                                                                                       turnNumber |-> (state[self].turnNumber)
+                                                                                                                   ] @@ state[self]]
+                                                                               /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {(             [
+                                                                                              status |-> Status.ABORT,
+                                                                                              turnNunber |-> (state'[self].turnNumber)
+                                                                                          ])}]
+                                                                          ELSE /\ Assert(FALSE, 
+                                                                                         "Failure of assertion at line 131, column 10 of macro called at line 205, column 44.")
+                                                                               /\ UNCHANGED << msgs, 
+                                                                                               state >>
+                                                         /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
+                                                    ELSE /\ \/ /\ pc' = [pc EXCEPT ![self] = "ForceMove"]
+                                                            \/ /\ pc' = [pc EXCEPT ![self] = "WaitForEvent"]
+                                                         /\ UNCHANGED << msgs, 
+                                                                         state >>
                               ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                                    /\ UNCHANGED << msgs, state >>
                         /\ UNCHANGED << challenge, me, msg >>
 
 ForceMove(self) == /\ pc[self] = "ForceMove"
-                   /\ Assert(challenge = NULL, 
-                             "Failure of assertion at line 145, column 1 of macro called at line 212, column 37.")
-                   /\ challenge' =              [
-                                     turnNumber |-> (state[self].turnNumber),
-                                     status     |-> ChallengeStatus.ACTIVE
-                                   ]
-                   /\ pc' = [pc EXCEPT ![self] = "WaitForResponse"]
+                   /\ IF /\ ~currentlyOurTurn(state[self])
+                         /\ ~challengeIsPresent
+                         THEN /\ Assert(challenge.status = ChallengeStatus.CLEARED, 
+                                        "Failure of assertion at line 214, column 21.")
+                              /\ challenge' =              [
+                                                turnNumber |-> (state[self].turnNumber),
+                                                status     |-> ChallengeStatus.ACTIVE
+                                              ]
+                              /\ pc' = [pc EXCEPT ![self] = "WaitForChallengeResponse"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
+                              /\ UNCHANGED challenge
                    /\ UNCHANGED << msgs, state, me, msg >>
 
-WaitForResponse(self) == /\ pc[self] = "WaitForResponse"
-                         /\ challenge.status # ChallengeStatus.ACTIVE
-                         /\ IF challenge.status = ChallengeStatus.RESPONDED
-                               THEN /\ TRUE
-                                    /\ state' = state
-                               ELSE /\ IF challenge.status = ChallengeStatus.EXPIRED
-                                          THEN /\ state' = [state EXCEPT ![self] =          [
-                                                                                       type |-> Types.TERMINATED,
-                                                                                       turnNumber |-> (challenge.turnNumber)
-                                                                                   ] @@ state[self]]
-                                          ELSE /\ Assert(FALSE, 
-                                                         "Failure of assertion at line 217, column 34.")
-                                               /\ state' = state
-                         /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
-                         /\ UNCHANGED << msgs, challenge, me, msg >>
+WaitForChallengeResponse(self) == /\ pc[self] = "WaitForChallengeResponse"
+                                  /\ challenge.status # ChallengeStatus.ACTIVE
+                                  /\ IF challenge.status = ChallengeStatus.RESPONDED
+                                        THEN /\ TRUE
+                                             /\ state' = state
+                                        ELSE /\ IF challenge.status = ChallengeStatus.EXPIRED
+                                                   THEN /\ state' = [state EXCEPT ![self] =          [
+                                                                                                type |-> Types.TERMINATED,
+                                                                                                turnNumber |-> (challenge.turnNumber)
+                                                                                            ] @@ state[self]]
+                                                   ELSE /\ Assert(FALSE, 
+                                                                  "Failure of assertion at line 220, column 30.")
+                                                        /\ state' = state
+                                  /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
+                                  /\ UNCHANGED << msgs, challenge, me, msg >>
+
+WaitForEvent(self) == /\ pc[self] = "WaitForEvent"
+                      /\ challengeIsPresent \/ msgs[me[self]] # {}
+                      /\ IF challengeIsPresent
+                            THEN /\ pc' = [pc EXCEPT ![self] = "ProcessChallenge"]
+                            ELSE /\ pc' = [pc EXCEPT ![self] = "ReadMessage"]
+                      /\ UNCHANGED << msgs, challenge, state, me, msg >>
 
 ProcessChallenge(self) == /\ pc[self] = "ProcessChallenge"
                           /\ TRUE
@@ -394,11 +398,11 @@ RespondToChallenge(self) == /\ pc[self] = "RespondToChallenge"
                             /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
                             /\ UNCHANGED << msgs, challenge, state, me, msg >>
 
-WaitForMessage(self) == /\ pc[self] = "WaitForMessage"
-                        /\ \E m \in msgs[me[self]]:
-                             msg' = [msg EXCEPT ![self] = m]
-                        /\ pc' = [pc EXCEPT ![self] = "ProcessMessage"]
-                        /\ UNCHANGED << msgs, challenge, state, me >>
+ReadMessage(self) == /\ pc[self] = "ReadMessage"
+                     /\ \E m \in msgs[me[self]]:
+                          msg' = [msg EXCEPT ![self] = m]
+                     /\ pc' = [pc EXCEPT ![self] = "ProcessMessage"]
+                     /\ UNCHANGED << msgs, challenge, state, me >>
 
 ProcessMessage(self) == /\ pc[self] = "ProcessMessage"
                         /\ IF msg[self].status = Status.OK
@@ -410,7 +414,7 @@ ProcessMessage(self) == /\ pc[self] = "ProcessMessage"
                                                                                      THEN /\ state' = [state EXCEPT ![self] = [ type  |-> Types.SUCCESS,  turnNumber |-> ((msg[self].turnNumber)+1)] @@ state[self]]
                                                                                           /\ msgs' = [recipient \in Names |-> IF recipient = me[self] THEN msgs[recipient] ELSE msgs[recipient] \cup {([status |-> Status.SUCCESS, turnNumber |-> ((msg[self].turnNumber)+1)])}]
                                                                                      ELSE /\ Assert((msg[self].votesRequired - 1) > 0, 
-                                                                                                    "Failure of assertion at line 73, column 1 of macro called at line 233, column 72.")
+                                                                                                    "Failure of assertion at line 73, column 1 of macro called at line 235, column 72.")
                                                                                           /\ state' = [state EXCEPT ![self] =          [
                                                                                                                                   type |-> Types.SENT,
                                                                                                                                   turnNumber |-> ((msg[self].turnNumber)+1),
@@ -433,7 +437,7 @@ ProcessMessage(self) == /\ pc[self] = "ProcessMessage"
                                                                                      ELSE /\ IF Behaviours[self] = AllowedBehaviours.SLEEP
                                                                                                 THEN /\ TRUE
                                                                                                 ELSE /\ Assert(FALSE, 
-                                                                                                               "Failure of assertion at line 128, column 14 of macro called at line 233, column 72.")
+                                                                                                               "Failure of assertion at line 128, column 14 of macro called at line 235, column 72.")
                                                                                           /\ UNCHANGED << msgs, 
                                                                                                           state >>
                                                                ELSE /\ IF state[self].type = Types.SENT
@@ -446,7 +450,7 @@ ProcessMessage(self) == /\ pc[self] = "ProcessMessage"
                                                                                               turnNunber |-> (msg[self].turnNumber)
                                                                                           ])}]
                                                                           ELSE /\ Assert(FALSE, 
-                                                                                         "Failure of assertion at line 131, column 10 of macro called at line 233, column 72.")
+                                                                                         "Failure of assertion at line 131, column 10 of macro called at line 235, column 72.")
                                                                                /\ UNCHANGED << msgs, 
                                                                                                state >>
                                                     ELSE /\ state' = [state EXCEPT ![self] =          [
@@ -477,17 +481,17 @@ ProcessMessage(self) == /\ pc[self] = "ProcessMessage"
 
 RemoveMessage(self) == /\ pc[self] = "RemoveMessage"
                        /\ Assert(msg[self] # NULL, 
-                                 "Failure of assertion at line 242, column 29.")
+                                 "Failure of assertion at line 244, column 29.")
                        /\ msgs' = [msgs EXCEPT ![me[self]] = msgs[me[self]] \ {msg[self]}]
                        /\ msg' = [msg EXCEPT ![self] = NULL]
                        /\ pc' = [pc EXCEPT ![self] = "ReachConsensus"]
                        /\ UNCHANGED << challenge, state, me >>
 
 consensusUpdate(self) == ReachConsensus(self) \/ ForceMove(self)
-                            \/ WaitForResponse(self)
-                            \/ ProcessChallenge(self)
+                            \/ WaitForChallengeResponse(self)
+                            \/ WaitForEvent(self) \/ ProcessChallenge(self)
                             \/ RespondToChallenge(self)
-                            \/ WaitForMessage(self) \/ ProcessMessage(self)
+                            \/ ReadMessage(self) \/ ProcessMessage(self)
                             \/ RemoveMessage(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
@@ -525,8 +529,7 @@ TypeOK ==
   \* participant state.
   /\ state \in [ParticipantIndices -> States]
   /\ \A p \in Names : \A m \in msgs[p] : m \in AllowedMessages
-  /\ \/ challenge = NULL
-     \/ challenge \in [turnNumber: Nat, status: Range(ChallengeStatus)]
+  /\ challenge \in [turnNumber: Nat, status: Range(ChallengeStatus)]
 
 \* TODO: Get TurnNumberDoesNotDecrease and StaysTerminated
 \* For some reason, state[p].turnNumber' is not valid
@@ -540,13 +543,13 @@ StaysTerminated == \A p \in ParticipantIndices: (Terminated(state[p]) => (state'
 ProtocolTerminates == 
     \/ (\A p \in ParticipantIndices: <>[](/\ state[p].type = Types.SUCCESS
                                           /\ state[p].turnNumber = StartingTurnNumber + NumParticipants))
-    \/ (\A p \in ParticipantIndices: <>[](/\ state[p].type = Types.FAILURE
+    \/ (\A p \in ParticipantIndices: <>[](/\ state[p].type = Types.ABORTED
                                           /\ state[p].turnNumber = state[1].turnNumber))
     
 \* The value of msg should eventually always be NULL
-MessagesAreRead == <>[](msgs = [p \in ParticipantIndices |-> {"Foo"}])
+MessagesAreRead == <>[](msgs = [p \in ParticipantIndices |-> {}])
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Aug 21 08:44:41 PDT 2019 by andrewstewart
+\* Last modified Wed Aug 21 10:49:24 PDT 2019 by andrewstewart
 \* Created Tue Aug 06 14:38:11 MDT 2019 by andrewstewart
